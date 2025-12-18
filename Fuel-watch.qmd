@@ -1,0 +1,502 @@
+---
+title: "Fuel watch analysis"
+author: "Rebeccah"
+format:
+  html:
+    embed-resources: true
+    toc: true
+    toc-depth: 3
+    code-fold: false
+    number-sections: true
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = FALSE,
+  message = FALSE,
+  warning = FALSE
+)
+
+```
+
+## Western Australia — map & context
+
+Western Australia’s population is heavily concentrated in the Perth metro region, with far fewer residents and fuel outlets across the vast northern and interior regions. This concentration explains why the metro region dominates our observations and exhibits strong price competition, while remote regions record fewer entries and often higher average prices due to distance and lower retailer density.
+
+```{r}
+library(tidyverse)
+library(lubridate)
+library(glue)
+
+files <- list.files("data-raw", pattern = "\\.csv$", full.names = TRUE)
+
+data <- files |>
+  map_df(readr::read_csv, show_col_types = FALSE, guess_max = 200000) |>
+  
+  select(-any_of("...11")) |>
+
+  filter(PRODUCT_DESCRIPTION == "ULP") |>
+  
+  mutate(
+    dt1 = suppressWarnings(ymd_hms(PUBLISH_DATE, tz = "Australia/Perth", quiet = TRUE)),
+    dt2 = suppressWarnings(ymd_hm (PUBLISH_DATE, tz = "Australia/Perth", quiet = TRUE)),
+    dt3 = suppressWarnings(dmy_hms(PUBLISH_DATE, tz = "Australia/Perth", quiet = TRUE)),
+    dt4 = suppressWarnings(dmy_hm (PUBLISH_DATE, tz = "Australia/Perth", quiet = TRUE)),
+    dt5 = suppressWarnings(ymd     (PUBLISH_DATE, quiet = TRUE)),
+    dt6 = suppressWarnings(dmy     (PUBLISH_DATE, quiet = TRUE)),
+    DATE_TIME = coalesce(dt1, dt2, dt3, dt4, as_datetime(dt5), as_datetime(dt6)),
+    DATE = as_date(DATE_TIME)
+  ) |>
+  select(-starts_with("dt")) |>
+  rename(
+    REGION = REGION_DESCRIPTION,
+    AREA   = AREA_DESCRIPTION,
+    BRAND  = BRAND_DESCRIPTION,
+    PRICE  = PRODUCT_PRICE
+  ) |>
+  mutate(WEEKDAY = wday(DATE, label = TRUE))
+
+glimpse(data)
+```
+
+Western Australia has a very uneven population distribution. The majority of the state’s population lives in the Perth metropolitan area, while most regional and remote areas have far fewer residents spread across large distances. This means there are fewer fuel stations in remote regions, and transport costs to supply them are higher. These structural differences help explain why fuel prices and price variation differ across regions.
+
+```{r}
+brand_by_region <- data |>
+  dplyr::count(REGION, BRAND, name = "n", sort = TRUE)
+
+top_brands <- brand_by_region |>
+  dplyr::group_by(BRAND) |>
+  dplyr::summarise(total = sum(n), .groups = "drop") |>
+  dplyr::slice_max(total, n = 10) |>
+  dplyr::pull(BRAND)
+
+brand_by_region_top <- brand_by_region |>
+  dplyr::filter(BRAND %in% top_brands)
+
+ggplot(brand_by_region_top, aes(x = REGION, y = n, fill = BRAND)) +
+  geom_col() +
+  coord_flip() +
+  labs(
+    title = "ULP price records by Region and Brand (Top 10)",
+    x = "Region", y = "Count of Records", fill = "Brand"
+  ) +
+  theme_minimal()
+```
+
+```{r}
+region_counts <- data |>
+  count(REGION, sort = TRUE)
+
+region_counts
+ggplot(region_counts, aes(x = reorder(REGION, n), y = n)) +
+  geom_col() +
+  coord_flip() +
+  labs(
+    title = "Number of ULP price records by Region",
+    x = "Region", y = "Count of Records"
+  )
+```
+
+The Metro region has the highest number of ULP price records, significantly more than all other regions. This reflects the high population density and the large number of service stations located in Perth. The South-West region has the next highest number of records, followed by Peel and Wheatbelt. More remote regions such as Pilbara, Kimberley and Gascoyne show far fewer price records, which is consistent with their smaller populations and lower number of fuel outlets. Overall, the dataset shows that most fuel price activity and competition occurs in the Metro area.
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(forcats)
+
+brand_region_counts <- data %>%
+  count(BRAND, REGION, name = "n")
+
+brand_totals <- brand_region_counts %>%
+  group_by(BRAND) %>%
+  summarise(total = sum(n), .groups = "drop")
+
+plot_df <- brand_region_counts %>%
+  left_join(brand_totals, by = "BRAND") %>%
+  mutate(BRAND = fct_reorder(BRAND, total))
+
+ggplot(plot_df, aes(x = BRAND, y = n, fill = REGION)) +
+  geom_col() +
+  coord_flip() +
+  labs(
+    title = "ULP Price Records by Brand (Stacked by Region)",
+    x = "Brand",
+    y = "Count of Records",
+    fill = "Region"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "bottom",
+    legend.title.position = "top"
+  )
+
+```
+
+The largest brands in terms of ULP price observations are BP, Ampol, and Caltex, reflecting their strong presence in Western Australia. For most brands, the majority of price records come from the Metro region, which aligns with Perth’s population concentration and higher density of service stations. However, many brands also have stations across multiple regional areas, suggesting that competition is not limited to the metropolitan area. Overall, the stacked bars indicate that while Metro dominates fuel activity, several major brands maintain a statewide footprint.
+
+```{r}
+
+daily_prices <- data |>
+  group_by(DATE) |>
+  summarise(avg_price = mean(PRICE, na.rm = TRUE))
+
+ggplot(daily_prices, aes(x = DATE, y = avg_price)) +
+  geom_line(color = "steelblue", linewidth = 1) +
+  labs(
+    title = "Average ULP Price Over Time",
+    x = "Date",
+    y = "Average Price (cents per litre)"
+  ) +
+  theme_minimal()
+```
+
+The line chart shows how the average ULP price has changed over time. The trend appears to move in cycles, which is consistent with known fuel price behaviours in Western Australia, where prices typically follow a weekly or fortnightly cycle. Periods of price peaks likely reflect market competition and price resetting by major fuel retailers. Short-term fluctuations may also be influenced by changes in wholesale fuel prices, taxes, or regional competition dynamics.
+
+```{r}
+region_avg_prices <- data |>
+  group_by(REGION) |>
+  summarise(avg_price = mean(PRICE, na.rm = TRUE)) |>
+  arrange(desc(avg_price))
+
+region_avg_prices
+
+ggplot(region_avg_prices, aes(x = reorder(REGION, avg_price), y = avg_price)) +
+  geom_col(fill = "steelblue") +
+  coord_flip() +
+  labs(
+    title = "Average ULP Price by Region",
+    x = "Region",
+    y = "Average Price (cents per litre)"
+  ) +
+  theme_minimal()
+```
+
+This chart shows the average ULP fuel price for each region. Regional areas such as Kimberley, Pilbara, and Goldfields-Esperance tend to have higher prices compared to the Metro and South-West regions. This is likely due to transportation distances, lower competition, and increased supply costs in remote locations.
+
+Metro and South-West regions show the lowest average prices, reflecting higher population density, more competition between fuel stations, and closer proximity to fuel distribution infrastructure.
+
+Overall, fuel prices tend to increase as distance from major population centers (such as Perth) increases, indicating that geographic location plays a significant role in determining fuel cost.
+
+```{r}
+weekday_avg <- data |>
+  group_by(WEEKDAY) |>
+  summarise(avg_price = mean(PRICE, na.rm = TRUE)) |>
+  mutate(WEEKDAY = factor(WEEKDAY, 
+                          levels = c("Mon","Tue","Wed","Thu","Fri","Sat","Sun"))) |>
+  arrange(WEEKDAY)
+
+weekday_avg
+
+ggplot(weekday_avg, aes(x = WEEKDAY, y = avg_price, group = 1)) +
+  geom_line(color = "darkblue", linewidth = 1.2) +
+  geom_point(size = 3, color = "red") +
+  labs(
+    title = "Average ULP Price by Day of Week",
+    x = "Day of Week",
+    y = "Average Price (cents per litre)"
+  ) +
+  theme_minimal()
+```
+
+This plot shows how average ULP fuel prices vary across the days of the week.
+
+We can see that prices are generally **lowest early in the week (Monday and Tuesday)** and begin to **increase towards the weekend**, peaking around **Friday or Saturday**. This pattern is consistent with consumer behaviour — demand tends to rise before weekends and public holidays, giving fuel stations an incentive to raise prices.
+
+Therefore, **the cheapest days to buy fuel are usually Monday or Tuesday**, while **Friday and Saturday tend to be the most expensive**.
+
+```{r}
+daily_prices <- data |>
+  group_by(DATE) |>
+  summarize(avg_price = mean(PRICE, na.rm = TRUE))
+
+ggplot(daily_prices, aes(x = DATE, y = avg_price)) +
+  geom_line(color = "steelblue") +
+  labs(
+    title = "Daily Average ULP Price Over Time",
+    x = "Date",
+    y = "Average Price (cents per litre)"
+  ) +
+  theme_minimal()
+
+```
+
+This line chart shows how the average ULP fuel price changes over time. We can see that prices fluctuate rather than remaining constant. These rises and falls may be influenced by factors such as changes in global crude oil prices, refinery output, shipping and supply disruptions, and competitive behaviour between service stations.
+
+If the trend gradually moves upward, it suggests that fuel prices have generally increased over the period studied. Short-term spikes or drops may reflect temporary market shocks or promotional pricing. Overall, this trend helps highlight whether prices are stable, increasing, or volatile across the months.
+
+```{r}
+library(lubridate)
+
+monthly_prices <- data |>
+  mutate(MONTH = floor_date(DATE, "month")) |>
+  group_by(MONTH) |>
+  summarize(avg_price = mean(PRICE, na.rm = TRUE), .groups = "drop")
+
+ggplot(monthly_prices, aes(MONTH, avg_price)) +
+  geom_line(linewidth = 0.7, color = "steelblue") +
+  labs(
+    title = "Monthly Average ULP Price (All Regions)",
+    x = "Month",
+    y = "Average Price (cents per litre)"
+  ) +
+  theme_minimal()
+```
+
+```{r}
+focus_regions <- c("Metro", "South-West", "Peel", "Wheatbelt")
+
+monthly_by_region <- data |>
+  filter(REGION %in% focus_regions) |>
+  mutate(MONTH = floor_date(DATE, "month")) |>
+  group_by(REGION, MONTH) |>
+  summarize(avg_price = mean(PRICE, na.rm = TRUE), .groups = "drop")
+
+ggplot(monthly_by_region, aes(MONTH, avg_price)) +
+  geom_line(linewidth = 0.7, color = "darkorange") +
+  facet_wrap(~ REGION, ncol = 2, scales = "free_y") +
+  labs(
+    title = "Monthly Average ULP Price by Region",
+    x = "Month",
+    y = "Average Price (cents per litre)"
+  ) +
+  theme_minimal()
+```
+
+These charts show how average ULP prices evolve month-to-month. Prices do not remain flat; they drift up and down over the year, reflecting movements in crude oil benchmarks, exchange rates, distribution costs, and local retail competition.
+
+The all-regions view provides the headline movement, while the faceted view shows that Metro tends to mirror the state trend closely (consistent with higher competition and frequent price updates). Regional areas (e.g., South-West, Peel, Wheatbelt) follow similar patterns but can show slightly smoother or lagged changes due to fewer stations and less frequent updates. Together, these confirm that month-to-month variation is normal and largely driven by broader market forces.
+
+```{r}
+weekday_avg <- data |>
+  mutate(WEEKDAY = wday(DATE, label = TRUE)) |>
+  group_by(WEEKDAY) |>
+  summarize(avg_price = mean(PRICE, na.rm = TRUE))
+
+ggplot(weekday_avg, aes(x = WEEKDAY, y = avg_price, group = 1)) +
+  geom_line(color = "darkblue", linewidth = 1.3) +
+  geom_point(size = 3, color = "red") +
+  labs(
+    title = "Average ULP Price by Day of Week",
+    x = "Day of Week",
+    y = "Average Price (cents per litre)"
+  ) +
+  theme_minimal()
+```
+
+This chart shows how average ULP fuel prices vary across the days of the week.
+
+Prices are generally *lowest early in the week* (Monday and Tuesday) and begin to increase towards the weekend, peaking around *Friday or Saturday*. This pattern is consistent with consumer behaviour: demand rises before weekends and public holidays, giving service stations an incentive to raise prices.
+
+Therefore, the cheapest days to buy fuel are usually **Monday or Tuesday**, while **Friday and Saturday** tend to be the most expensive days.
+
+```{r}
+monthly_prices <- data %>%
+  mutate(MONTH = floor_date(DATE, "month")) %>%
+  group_by(MONTH) %>%
+  summarize(avg_price = mean(PRICE, na.rm = TRUE))
+
+ggplot(monthly_prices, aes(x = MONTH, y = avg_price)) +
+  geom_line() +
+  labs(
+    title = "Monthly Average ULP Price (Statewide)",
+    x = "Month",
+    y = "Average Price (cents per litre)"
+  )
+```
+
+This chart shows how average ULP fuel prices change from month to month. Prices do not stay constant; they move up and down over the year. These fluctuations can be influenced by global oil prices, currency exchange rates, seasonal demand, supply chain costs, and competitive behaviour among fuel retailers.
+
+We can see that some months experience noticeable peaks, while others show dips. This is normal as fuel prices respond quickly to external market conditions. Overall, the chart helps to reveal whether prices are trending upward, downward, or remaining relatively stable over the observed period.
+
+```{r}
+library(dplyr)
+library(ggplot2)
+
+daily_region <- data %>%
+  group_by(REGION, DATE) %>%
+  summarise(avg_price = mean(PRICE, na.rm = TRUE), .groups = "drop")
+
+
+ggplot(daily_region, aes(x = DATE, y = avg_price)) +
+  geom_line() +
+  facet_wrap(~ REGION, ncol = 2) +
+  labs(
+    title = "Daily Average ULP Price by Region",
+    x = "Date",
+    y = "Average Price (c/L)"
+  ) +
+  theme_minimal()
+
+```
+
+This chart compares daily average ULP prices across regions. The Metro region generally follows the overall state trend, with prices rising and falling in line with broader market conditions. Regional and remote areas such as Pilbara, Kimberley, and Goldfields–Esperance often show higher average prices. This is likely due to increased transport costs, fewer fuel suppliers, and lower competition. In contrast, the Metro region usually displays lower prices because of greater station density and stronger competition among retailers. \## Station-Level Price Variation
+
+```{r}
+library(dplyr)
+
+station_summary <- data %>%
+  group_by(TRADING_NAME) %>%
+  summarise(
+    N_OBS_TRADING_NAME = n(),
+    MEAN_PRICE = mean(PRICE, na.rm = TRUE),
+    SD_PRICE = sd(PRICE, na.rm = TRUE),
+    REGION = first(REGION)
+  ) %>%
+  ungroup()
+
+head(station_summary)
+```
+
+```{r}
+station_filtered <- station_summary %>%
+  filter(N_OBS_TRADING_NAME >= 30)
+
+ggplot(station_filtered, aes(x = SD_PRICE)) +
+  geom_histogram(bins = 30, color = "white") +
+  theme_minimal() +
+  labs(
+    title = "Distribution of Station-Level Price Variation",
+    x = "Standard Deviation of Price (c/L)",
+    y = "Number of Stations"
+  )
+```
+
+Most stations exhibit relatively low price variation, indicating that prices do not change dramatically from day to day at many locations. However, there is a noticeable upper tail, where some stations show much higher price volatility. These stations are likely located in highly competitive areas or areas subject to more frequent supply cost fluctuations.
+
+```{r}
+ggplot(station_filtered, aes(x = MEAN_PRICE, y = SD_PRICE, color = REGION)) +
+  geom_point(alpha = 0.7) +
+  theme_minimal() +
+  labs(
+    title = "Station-Level Mean Price vs Price Variation",
+    x = "Mean Price (c/L)",
+    y = "Standard Deviation (c/L)",
+    color = "Region"
+  )
+```
+
+Stations in remote regions tend to show both higher average prices and greater price variation, reflecting higher transportation and supply costs as well as reduced competition. Metro stations cluster at lower average prices with lower volatility, which aligns with stronger competition in Perth.
+
+```{r}
+library(dplyr)
+
+station_summary <- data %>%
+  group_by(TRADING_NAME, BRAND) %>% 
+  summarise(
+    N_OBS_TRADING_NAME = n(),
+    MEAN_PRICE = mean(PRICE, na.rm = TRUE),
+    SD_PRICE = sd(PRICE, na.rm = TRUE),
+    REGION = first(REGION),
+    .groups = "drop"
+  )
+
+head(station_summary)
+
+
+```
+
+Brands with higher average prices also tend to show greater price variation, indicating more aggressive price cycling or cost exposure. Brands with lower average prices and low variation are likely following a stable, competitive pricing strategy. The number of stations per brand reflects market presence.
+
+We now examine whether stations can be grouped into clusters based on how their prices change over time. This helps identify common pricing strategies and differences in competition intensity.
+
+```{r}
+station_days <- data %>%
+  group_by(TRADING_NAME, BRAND, REGION, DATE) %>%
+  summarise(PRICE = mean(PRICE), .groups = "drop")
+
+stations_full <- station_days %>%
+  count(TRADING_NAME, BRAND, name = "n_days") %>%
+  filter(n_days >= 300) 
+
+clust_data <- station_days %>%
+  inner_join(stations_full, by = c("TRADING_NAME","BRAND"))
+
+```
+
+We keep only stations that report prices for most of the year, ensuring that clusters are based on comparable time series rather than missing data patterns.
+
+```{r}
+price_matrix <- clust_data %>%
+  select(TRADING_NAME, BRAND, REGION, DATE, PRICE) %>%
+  tidyr::pivot_wider(names_from = DATE, values_from = PRICE)
+
+price_matrix <- price_matrix %>% tidyr::drop_na()
+
+meta <- price_matrix %>% dplyr::select(TRADING_NAME, BRAND, REGION)
+X    <- price_matrix %>% dplyr::select(-TRADING_NAME, -BRAND, -REGION)
+
+
+```
+
+We convert the data into a matrix where each row is a station and each column is a date. This format allows us to apply k-means clustering to compare price patterns directly.
+
+```{r}
+set.seed(123)
+X_scaled <- scale(X)
+k <- 3
+km <- kmeans(X_scaled, centers = k, nstart = 25)
+
+cluster_assignments <- meta %>%
+  mutate(CLUSTER = factor(km$cluster))
+
+```
+
+We choose k = 3 clusters, which balances interpretability and variation in pricing behavior across stations.
+
+```{r}
+station_summary_5 <- clust_data %>%
+  group_by(TRADING_NAME, BRAND, REGION) %>%
+  summarise(MEAN_PRICE = mean(PRICE), SD_PRICE = sd(PRICE), .groups = "drop") %>%
+  inner_join(cluster_assignments, by = c("TRADING_NAME","BRAND","REGION"))
+
+ggplot(station_summary_5, aes(x = MEAN_PRICE, y = SD_PRICE, color = CLUSTER)) +
+  geom_point(alpha = 0.75) +
+  theme_minimal() +
+  labs(
+    title = "Clustered Stations: Mean Price vs Variation",
+    x = "Mean Price (c/L)",
+    y = "Price Variation (SD)"
+  )
+ 
+```
+
+Cluster 1 generally contains lower-priced, low-variation stations, mostly in Metro areas.\
+Cluster 2 includes higher-priced stations with higher variation, consistent with remote regions that have fewer competitors.\
+Cluster 3 represents moderate pricing and intermediate variability.
+
+```{r}
+clust_trends <- clust_data %>%
+  inner_join(cluster_assignments, by = c("TRADING_NAME","BRAND","REGION")) %>%
+  group_by(CLUSTER, DATE) %>%
+  summarise(avg_price = mean(PRICE), .groups = "drop")
+
+ggplot(clust_trends, aes(x = DATE, y = avg_price)) +
+  geom_line() +
+  facet_wrap(~ CLUSTER, ncol = 1) +
+  theme_minimal() +
+  labs(
+    title = "Average Daily Price Pattern for Each Cluster",
+    x = "Date", y = "Average Price (c/L)"
+  )
+
+```
+
+Cluster 1 shows clear weekly price cycling due to strong competition.\
+Cluster 2 displays flatter but higher average prices, reflecting supply and transport cost effects.\
+Cluster 3 shows moderate cycling, representing mixed competitive conditions.
+
+```{r}
+station_summary_5 %>% count(REGION, CLUSTER)
+
+station_summary_5 %>% count(BRAND, CLUSTER)
+```
+
+The region and brand cluster distributions confirm that competition (metro vs remote) and brand pricing strategy both contribute to the observed clustering patterns.
+
+## Conclusion
+
+Overall, fuel prices in Western Australia reflect geography and competition more than random noise. The Metro region records the most observations and exhibits clear weekly price cycles with lower average levels, consistent with dense station competition. Remote regions (e.g., Pilbara, Kimberley, Goldfields–Esperance) show higher average prices and smoother or less regular cycles, pointing to longer supply chains and fewer competitors.
+
+At the station level, most outlets display modest day-to-day variability, but a subset is markedly more volatile. The clustering analysis (k = 3) confirms three distinct pricing behaviours: 1) a low-price/low-variation cluster dominated by Metro stations, 2) a high-price/high-variation cluster concentrated in remote regions, and 3) an intermediate cluster with moderate levels and cycling. Region×Cluster and Brand×Cluster summaries indicate that location and brand footprint/strategy shape these patterns.
+
+For consumers, buying early in the week (especially Monday–Tuesday) and in highly competitive areas tends to be cheapest. For policymakers and operators, the results suggest that logistics costs and market structure (station density, brand presence) drive persistent regional differences and the strength of the weekly cycle.
